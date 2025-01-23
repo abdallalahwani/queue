@@ -2,7 +2,6 @@
 // If the tester succeeds, it will print "All tests succeeded!" in the end.
 // Otherwise, it will hopefully print the reason it failed.
 // Don't forget to compile with -pthread
-// gcc-O3-D_POSIX_C_SOURCE=200809-Wall-std=c11-pthread-c queue.c -o queue
 //
 // There are four tests here:
 // - Single-Threaded Test:
@@ -249,11 +248,15 @@ static void test_write_first(void) {
 
 static atomic_int test_order_turn;
 
+const struct timespec one_hundred_ms = {
+    .tv_nsec = 100 * 1000 * 1000
+};
+
 static int test_order_reader(void *input) {
     int index = (int)(uintptr_t)input;
     printf("Reader thread %d: started.\n", index);
     while (test_order_turn != index) thrd_yield();
-    for (int i = 0; i < 20; i++) thrd_yield();
+    thrd_sleep(&one_hundred_ms, NULL);
     printf("Reader thread %d: dequeuing.\n", index);
     test_order_turn++;
     int n = (char*)dequeue() - addresses;
@@ -269,7 +272,7 @@ static int test_order_writer(void *input) {
     int index = (int)(uintptr_t)input;
     printf("Writer thread %d: started.\n", index);
     while (test_order_turn != index + 20) thrd_yield();
-    for (int i = 0; i < 20; i++) thrd_yield();
+    thrd_sleep(&one_hundred_ms, NULL);
     printf("Writer thread %d: enqueuing %dth pointer.\n", index, index);
     enqueue(&addresses[index]);
     test_order_turn++;
@@ -288,7 +291,7 @@ void test_order(void) {
         thrd_create(&reader_ids[i], test_order_reader, (void*)(uintptr_t)i);
     }
     while (test_order_turn != 20) thrd_yield();
-    for (int i = 0; i < 20; i++) thrd_yield();
+    thrd_sleep(&one_hundred_ms, NULL);
     if (visited() != 0) {
         printf("visited() should return zero.\n");
         exit(1);
@@ -318,9 +321,9 @@ void test_order(void) {
         assert(tryDequeue(&ptr));
         assert(ptr == &addresses[i]);
     }
-    printf("Trying to dequeue; expection to fail.\n");
+    printf("Trying to dequeue; expecting to fail.\n");
     assert(!tryDequeue(&ptr));
-    printf("Trying to dequeue; expection to fail.\n");
+    printf("Trying to dequeue; expecting to fail.\n");
     assert(!tryDequeue(&ptr));
     printf("Destroying queue.\n");
     destroyQueue();
