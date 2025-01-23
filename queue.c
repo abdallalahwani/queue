@@ -1,12 +1,8 @@
 #include <stdatomic.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <threads.h>
-#include <stdio.h>  // Added for perror
 
-
-// Queue Node Definition
 typedef struct Node {
     void* data;
     struct Node* next;
@@ -15,28 +11,32 @@ typedef struct Node {
 typedef struct {
     Node* head;
     Node* tail;
-    atomic_size_t visited_count; // Tracks visited items
-    atomic_size_t size;          // Tracks current queue size
-    size_t current_turn;
+    atomic_size_t visited_count; // Lock-free for visited()
+    size_t count;                // Current items in the queue
+    
     mtx_t mutex;
-    cnd_t cond;
+    cnd_t not_empty;
+    
+    // Ticket system for FIFO wakeup
+    size_t next_ticket;    // Next ticket number to assign
+    size_t current_ticket; // Current ticket being served
+    size_t waiters;        // Number of waiting threads
 } Queue;
 
-// Global queue instance
 static Queue queue;
 
-// Initialize the queue
 void initQueue(void) {
     queue.head = NULL;
     queue.tail = NULL;
     atomic_init(&queue.visited_count, 0);
-    atomic_init(&queue.size, 0);
-    queue.current_turn = 0;
+    queue.count = 0;
     mtx_init(&queue.mutex, mtx_plain);
-    cnd_init(&queue.cond);
+    cnd_init(&queue.not_empty);
+    queue.next_ticket = 0;
+    queue.current_ticket = 0;
+    queue.waiters = 0;
 }
 
-// Destroy the queue
 void destroyQueue(void) {
     mtx_lock(&queue.mutex);
     Node* current = queue.head;
@@ -47,90 +47,77 @@ void destroyQueue(void) {
     }
     queue.head = NULL;
     queue.tail = NULL;
+    queue.count = 0;
     mtx_unlock(&queue.mutex);
     mtx_destroy(&queue.mutex);
-    cnd_destroy(&queue.cond);
+    cnd_destroy(&queue.not_empty);
 }
 
-// Enqueue an item
 void enqueue(void* item) {
-    Node* new_node = (Node*)malloc(sizeof(Node));
-    if (!new_node) {
-        perror("Failed to allocate memory for new node");
-        exit(EXIT_FAILURE);
-    }
+    Node* new_node = malloc(sizeof(Node));
     new_node->data = item;
     new_node->next = NULL;
 
     mtx_lock(&queue.mutex);
-
-    if (queue.tail != NULL) {
-        queue.tail->next = new_node;
-    } else {
+    if (queue.tail == NULL) {
         queue.head = new_node;
+    } else {
+        queue.tail->next = new_node;
     }
     queue.tail = new_node;
-    atomic_fetch_add(&queue.size, 1);
-
-    cnd_signal(&queue.cond);
+    queue.count++;
+    
+    // Wake all waiters to check their tickets
+    if (queue.waiters > 0) {
+        cnd_broadcast(&queue.not_empty);
+    }
     mtx_unlock(&queue.mutex);
 }
 
-// Dequeue an item (blocking)
 void* dequeue(void) {
     mtx_lock(&queue.mutex);
-
-    while (queue.head == NULL) {
-        cnd_wait(&queue.cond, &queue.mutex);
+    const size_t my_ticket = queue.next_ticket++;
+    queue.waiters++;
+    
+    // Wait until queue has items and it's this thread's turn
+    while (queue.count == 0 || queue.current_ticket != my_ticket) {
+        cnd_wait(&queue.not_empty, &queue.mutex);
     }
-
-    Node* node = queue.head;
-    queue.head = node->next;
-    if (queue.head == NULL) {
-        queue.tail = NULL;
-    }
-
-    void* data = node->data;
-    free(node);
-    atomic_fetch_sub(&queue.size, 1);
+    
+    Node* old_head = queue.head;
+    void* data = old_head->data;
+    queue.head = old_head->next;
+    if (queue.head == NULL) queue.tail = NULL;
+    queue.count--;
     atomic_fetch_add(&queue.visited_count, 1);
-    queue.current_turn++;
-
+    free(old_head);
+    
+    queue.current_ticket++; // Advance to next waiter
+    queue.waiters--;
     mtx_unlock(&queue.mutex);
     return data;
 }
 
-// Attempt to dequeue an item without blocking
-bool tryDequeue(void** item) {
+bool tryDequeue(void** output) {
     mtx_lock(&queue.mutex);
-
-    if (queue.head == NULL) {
-        mtx_unlock(&queue.mutex);
-        return false;
+    bool success = false;
+    
+    // Only succeed if queue has items and no waiters
+    if (queue.count > 0 && queue.waiters == 0) {
+        Node* old_head = queue.head;
+        *output = old_head->data;
+        queue.head = old_head->next;
+        if (queue.head == NULL) queue.tail = NULL;
+        queue.count--;
+        atomic_fetch_add(&queue.visited_count, 1);
+        free(old_head);
+        success = true;
     }
-
-    Node* node = queue.head;
-    queue.head = node->next;
-    if (queue.head == NULL) {
-        queue.tail = NULL;
-    }
-
-    *item = node->data;
-    free(node);
-    atomic_fetch_sub(&queue.size, 1);
-    atomic_fetch_add(&queue.visited_count, 1);
-    queue.current_turn++;
-
+    
     mtx_unlock(&queue.mutex);
-    return true;
+    return success;
 }
 
-// Get the total number of visited items
 size_t visited(void) {
     return atomic_load(&queue.visited_count);
-}
-
-// Get the current size of the queue
-size_t size(void) {
-    return atomic_load(&queue.size);
 }
