@@ -11,16 +11,16 @@ typedef struct Node {
 typedef struct {
     Node* head;
     Node* tail;
-    atomic_size_t visited_count; // Lock-free for visited()
-    size_t count;                // Current items in the queue
+    atomic_size_t visited_count; // Tracks items processed
+    size_t count;                // Current queue size
     
     mtx_t mutex;
     cnd_t not_empty;
     
     // Ticket system for FIFO wakeup
     size_t next_ticket;    // Next ticket number to assign
-    size_t current_ticket; // Current ticket being served
-    size_t waiters;        // Number of waiting threads
+    size_t current_ticket; // Ticket being served now
+    size_t waiters;        // Number of threads waiting
 } Queue;
 
 static Queue queue;
@@ -66,8 +66,8 @@ void enqueue(void* item) {
     }
     queue.tail = new_node;
     queue.count++;
-    
-    // Wake all waiters to check their tickets
+
+    // Wake all waiting threads to check their tickets
     if (queue.waiters > 0) {
         cnd_broadcast(&queue.not_empty);
     }
@@ -76,24 +76,29 @@ void enqueue(void* item) {
 
 void* dequeue(void) {
     mtx_lock(&queue.mutex);
-    const size_t my_ticket = queue.next_ticket++;
+    const size_t my_ticket = queue.next_ticket++; // Take a ticket
     queue.waiters++;
-    
-    // Wait until queue has items and it's this thread's turn
+
+    // Wait until:
+    // 1. Queue has items, AND
+    // 2. It's this thread's turn (FIFO order)
     while (queue.count == 0 || queue.current_ticket != my_ticket) {
         cnd_wait(&queue.not_empty, &queue.mutex);
     }
-    
+
+    // Dequeue the item
     Node* old_head = queue.head;
     void* data = old_head->data;
     queue.head = old_head->next;
     if (queue.head == NULL) queue.tail = NULL;
     queue.count--;
     atomic_fetch_add(&queue.visited_count, 1);
-    free(old_head);
-    
-    queue.current_ticket++; // Advance to next waiter
+
+    // Advance to the next waiting thread
+    queue.current_ticket++;
     queue.waiters--;
+
+    free(old_head);
     mtx_unlock(&queue.mutex);
     return data;
 }
@@ -101,8 +106,10 @@ void* dequeue(void) {
 bool tryDequeue(void** output) {
     mtx_lock(&queue.mutex);
     bool success = false;
-    
-    // Only succeed if queue has items and no waiters
+
+    // Only succeed if:
+    // 1. Queue has items, AND
+    // 2. No threads are waiting (to avoid stealing items)
     if (queue.count > 0 && queue.waiters == 0) {
         Node* old_head = queue.head;
         *output = old_head->data;
@@ -113,7 +120,7 @@ bool tryDequeue(void** output) {
         free(old_head);
         success = true;
     }
-    
+
     mtx_unlock(&queue.mutex);
     return success;
 }
