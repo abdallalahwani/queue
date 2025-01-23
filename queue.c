@@ -11,16 +11,16 @@ typedef struct Node {
 typedef struct {
     Node* head;
     Node* tail;
-    atomic_size_t visited_count; // Tracks items processed
-    size_t count;                // Current queue size
+    atomic_size_t visited_count;
+    size_t count;                // Protected by mutex
     
     mtx_t mutex;
     cnd_t not_empty;
     
-    // Ticket system for FIFO wakeup
-    size_t next_ticket;    // Next ticket number to assign
-    size_t current_ticket; // Ticket being served now
-    size_t waiters;        // Number of threads waiting
+    // Ticket system for FIFO wakeup order
+    size_t next_ticket;          // Next ticket to assign
+    size_t current_ticket;       // Ticket being served
+    size_t waiters;              // Number of waiting threads
 } Queue;
 
 static Queue queue;
